@@ -1,0 +1,61 @@
+{
+  "name": "@ledgr/db",
+  "version": "1.0.0",
+  "description": "Database abstraction layer for Ledgr application",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js"
+    },
+    "./drivers/better-sqlite3": {
+      "types": "./dist/drivers/better-sqlite3.d.ts",
+      "require": "./dist/drivers/better-sqlite3.js"
+    },
+    "./drivers/capacitor-sqlite": {
+      "types": "./dist/drivers/capacitor-sqlite.d.ts",
+      "require": "./dist/drivers/capacitor-sqlite.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "drivers/better-sqlite3": ["dist/drivers/better-sqlite3.d.ts"],
+      "drivers/capacitor-sqlite": ["dist/drivers/capacitor-sqlite.d.ts"]
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "budget",
+    "finance",
+    "database",
+    "sqlite"
+  ],
+  "author": "Johnathen Chilcher (TechLoom)",
+  "license": "MIT",
+  "dependencies": {
+    "@ledgr/core": "*"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=9.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "better-sqlite3": "^9.2.2",
+    "typescript": "^5.3.3"
+  }
+}
