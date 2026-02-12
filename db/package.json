@@ -20,8 +20,12 @@
   },
   "typesVersions": {
     "*": {
-      "drivers/better-sqlite3": ["dist/drivers/better-sqlite3.d.ts"],
-      "drivers/capacitor-sqlite": ["dist/drivers/capacitor-sqlite.d.ts"]
+      "drivers/better-sqlite3": [
+        "dist/drivers/better-sqlite3.d.ts"
+      ],
+      "drivers/capacitor-sqlite": [
+        "dist/drivers/capacitor-sqlite.d.ts"
+      ]
     }
   },
   "files": [
@@ -43,7 +47,7 @@
   "author": "Johnathen Chilcher (TechLoom)",
   "license": "MIT",
   "dependencies": {
-    "@ledgr/core": "*"
+    "@ledgr/core": "file:../core"
   },
   "peerDependencies": {
     "better-sqlite3": ">=9.0.0"
