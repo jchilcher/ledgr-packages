@@ -176,21 +176,23 @@ export function forecastCashFlow(
       transactions,
     });
 
-    // Check for warnings
-    if (currentBalance < 0) {
-      warnings.push({
-        type: 'negative_balance',
-        date,
-        balance: currentBalance,
-        message: `Balance will be negative ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
-      });
-    } else if (currentBalance < lowBalanceThreshold) {
-      warnings.push({
-        type: 'low_balance',
-        date,
-        balance: currentBalance,
-        message: `Low balance ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
-      });
+    // Check for warnings (skip for credit accounts — negative balances are normal)
+    if (account.type !== 'credit') {
+      if (currentBalance < 0) {
+        warnings.push({
+          type: 'negative_balance',
+          date,
+          balance: currentBalance,
+          message: `Balance will be negative ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
+        });
+      } else if (currentBalance < lowBalanceThreshold) {
+        warnings.push({
+          type: 'low_balance',
+          date,
+          balance: currentBalance,
+          message: `Low balance ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
+        });
+      }
     }
   }
 
@@ -510,21 +512,23 @@ export function forecastCashFlowEnhanced(
       categoryTrends: categoryTrends.length > 0 ? categoryTrends : undefined,
     });
 
-    // Check for warnings
-    if (currentBalance < 0) {
-      warnings.push({
-        type: 'negative_balance',
-        date: new Date(date),
-        balance: currentBalance,
-        message: `Balance will be negative ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
-      });
-    } else if (currentBalance < lowBalanceThreshold) {
-      warnings.push({
-        type: 'low_balance',
-        date: new Date(date),
-        balance: currentBalance,
-        message: `Low balance ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
-      });
+    // Check for warnings (skip for credit accounts — negative balances are normal)
+    if (account.type !== 'credit') {
+      if (currentBalance < 0) {
+        warnings.push({
+          type: 'negative_balance',
+          date: new Date(date),
+          balance: currentBalance,
+          message: `Balance will be negative ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
+        });
+      } else if (currentBalance < lowBalanceThreshold) {
+        warnings.push({
+          type: 'low_balance',
+          date: new Date(date),
+          balance: currentBalance,
+          message: `Low balance ($${(currentBalance / 100).toFixed(2)}) on ${date.toLocaleDateString()}`,
+        });
+      }
     }
 
     // Warn about high uncertainty

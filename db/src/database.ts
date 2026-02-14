@@ -49,6 +49,15 @@ import type {
   TransactionReimbursement,
   ReimbursementStatus,
   ReimbursementSummary,
+  SavedReport,
+  User,
+  OwnershipType,
+  TransactionAttachment,
+  UserKeys,
+  DataShare,
+  SharingDefault,
+  SharePermissions,
+  EncryptableEntityType,
 } from './types';
 import {
   AccountRow, TransactionRow, CategoryRow, CategoryRuleRow, TagRow,
@@ -60,6 +69,8 @@ import {
   InvestmentSettingsRow, RecurringItemRow, RecurringPaymentRow,
   ManualAssetRow, ManualLiabilityRow, NetWorthSnapshotRow,
   AssetValueHistoryRow, LiabilityValueHistoryRow,
+  SavedReportRow, UserRow, TransactionAttachmentRow,
+  UserKeyRow, DataEncryptionKeyRow, DataShareRow, SharingDefaultRow,
 } from './row-types';
 import { randomUUID } from 'crypto';
 
@@ -93,6 +104,14 @@ export class LedgrDatabase {
       this.driver.exec('ALTER TABLE accounts ADD COLUMN ofxAccountId TEXT');
     }
 
+    // Add household ownership columns to accounts table
+    if (!accountColumnNames.includes('ownership')) {
+      this.driver.exec("ALTER TABLE accounts ADD COLUMN ownership TEXT DEFAULT 'mine'");
+    }
+    if (!accountColumnNames.includes('ownerId')) {
+      this.driver.exec('ALTER TABLE accounts ADD COLUMN ownerId TEXT');
+    }
+
     // Add fitId column to transactions table if it doesn't exist
     const transactionColumns = this.driver.all<{ name: string }>("PRAGMA table_info(transactions)");
     const transactionColumnNames = transactionColumns.map(c => c.name);
@@ -100,6 +119,16 @@ export class LedgrDatabase {
     if (!transactionColumnNames.includes('fitId')) {
       this.driver.exec('ALTER TABLE transactions ADD COLUMN fitId TEXT');
       this.driver.exec('CREATE INDEX IF NOT EXISTS idx_transactions_fitId ON transactions(fitId)');
+    }
+
+    // Add notes column to transactions table if it doesn't exist
+    if (!transactionColumnNames.includes('notes')) {
+      this.driver.exec('ALTER TABLE transactions ADD COLUMN notes TEXT');
+    }
+
+    // Add isHidden column to transactions table if it doesn't exist
+    if (!transactionColumnNames.includes('isHidden')) {
+      this.driver.exec('ALTER TABLE transactions ADD COLUMN isHidden INTEGER DEFAULT 0');
     }
 
     // Add isInternalTransfer column to transactions table if it doesn't exist
@@ -151,11 +180,17 @@ export class LedgrDatabase {
       `, savingsAccounts.map(a => a.id));
     }
 
+    // Add ownerId columns to entity tables for per-user ownership
+    this.migrateOwnershipColumns();
+
     // Migrate savings amounts from dollars to cents (missed in original migration)
     this.migrateSavingsToCents();
 
     // Sync all pinned savings goals with their account balances
     this.syncAllPinnedSavingsGoals();
+
+    // Add isEncrypted columns to entity tables
+    this.migrateEncryptionColumns();
   }
 
   private migrateDollarsToCents(): void {
@@ -540,6 +575,79 @@ export class LedgrDatabase {
     }
   }
 
+  private migrateOwnershipColumns(): void {
+    // Add ownerId to recurring_items (camelCase table)
+    const riCols = this.driver.all<{ name: string }>("PRAGMA table_info(recurring_items)");
+    if (!riCols.map(c => c.name).includes('ownerId')) {
+      console.log('[DB Migration] Adding ownerId column to recurring_items...');
+      this.driver.exec('ALTER TABLE recurring_items ADD COLUMN ownerId TEXT');
+    }
+
+    // Add owner_id to manual_assets (snake_case table)
+    const maCols = this.driver.all<{ name: string }>("PRAGMA table_info(manual_assets)");
+    if (!maCols.map(c => c.name).includes('owner_id')) {
+      console.log('[DB Migration] Adding owner_id column to manual_assets...');
+      this.driver.exec('ALTER TABLE manual_assets ADD COLUMN owner_id TEXT');
+    }
+
+    // Add owner_id to manual_liabilities (snake_case table)
+    const mlCols = this.driver.all<{ name: string }>("PRAGMA table_info(manual_liabilities)");
+    if (!mlCols.map(c => c.name).includes('owner_id')) {
+      console.log('[DB Migration] Adding owner_id column to manual_liabilities...');
+      this.driver.exec('ALTER TABLE manual_liabilities ADD COLUMN owner_id TEXT');
+    }
+
+    // Add ownerId to savings_goals (camelCase table)
+    const sgCols = this.driver.all<{ name: string }>("PRAGMA table_info(savings_goals)");
+    if (!sgCols.map(c => c.name).includes('ownerId')) {
+      console.log('[DB Migration] Adding ownerId column to savings_goals...');
+      this.driver.exec('ALTER TABLE savings_goals ADD COLUMN ownerId TEXT');
+    }
+
+    // Add owner_id to investment_accounts (snake_case table)
+    const iaCols = this.driver.all<{ name: string }>("PRAGMA table_info(investment_accounts)");
+    if (!iaCols.map(c => c.name).includes('owner_id')) {
+      console.log('[DB Migration] Adding owner_id column to investment_accounts...');
+      this.driver.exec('ALTER TABLE investment_accounts ADD COLUMN owner_id TEXT');
+    }
+
+    // Backfill accounts.ownerId from legacy ownership field
+    this.backfillAccountOwnership();
+  }
+
+  private backfillAccountOwnership(): void {
+    // Only backfill if there are accounts with ownership set but no ownerId
+    const needsBackfill = this.driver.get<{ c: number }>(
+      "SELECT COUNT(*) as c FROM accounts WHERE ownership IS NOT NULL AND ownership != 'shared' AND ownerId IS NULL"
+    );
+    if (!needsBackfill || needsBackfill.c === 0) return;
+
+    const users = this.driver.all<{ id: string; isDefault: number }>('SELECT id, isDefault FROM users ORDER BY isDefault DESC');
+    if (users.length === 0) return;
+
+    const defaultUser = users.find(u => u.isDefault === 1) ?? users[0];
+    const otherUser = users.length >= 2 ? users.find(u => u.id !== defaultUser.id) : null;
+
+    console.log('[DB Migration] Backfilling accounts.ownerId from legacy ownership field...');
+
+    // mine -> defaultUser
+    this.driver.run(
+      "UPDATE accounts SET ownerId = ? WHERE ownership = 'mine' AND ownerId IS NULL",
+      [defaultUser.id]
+    );
+
+    // partner -> otherUser (if exactly 2 users)
+    if (otherUser) {
+      this.driver.run(
+        "UPDATE accounts SET ownerId = ? WHERE ownership = 'partner' AND ownerId IS NULL",
+        [otherUser.id]
+      );
+    }
+
+    // shared -> NULL (already NULL, nothing to do)
+    console.log('[DB Migration] Account ownership backfill complete.');
+  }
+
   private clearCorruptedNetWorthSnapshots(): void {
     const already = this.getSetting('migration_clear_nw_snapshots', '');
     if (already === 'done') return;
@@ -561,7 +669,47 @@ export class LedgrDatabase {
     console.log('[DB Migration] Corrupted net worth snapshot cleanup complete.');
   }
 
+  private migrateEncryptionColumns(): void {
+    // camelCase tables: accounts, recurring_items, savings_goals
+    const camelCaseTables = ['accounts', 'recurring_items', 'savings_goals'];
+    for (const table of camelCaseTables) {
+      const cols = this.driver.all<{ name: string }>(`PRAGMA table_info(${table})`);
+      if (!cols.map(c => c.name).includes('isEncrypted')) {
+        this.driver.exec(`ALTER TABLE ${table} ADD COLUMN isEncrypted INTEGER DEFAULT 0`);
+      }
+    }
+
+    // snake_case tables: manual_assets, manual_liabilities, investment_accounts
+    const snakeCaseTables = ['manual_assets', 'manual_liabilities', 'investment_accounts'];
+    for (const table of snakeCaseTables) {
+      const cols = this.driver.all<{ name: string }>(`PRAGMA table_info(${table})`);
+      if (!cols.map(c => c.name).includes('is_encrypted')) {
+        this.driver.exec(`ALTER TABLE ${table} ADD COLUMN is_encrypted INTEGER DEFAULT 0`);
+      }
+    }
+  }
+
   private initializeTables(): void {
+    // Create users table (household support)
+    this.driver.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL DEFAULT '#3b82f6',
+        isDefault INTEGER NOT NULL DEFAULT 0,
+        createdAt INTEGER NOT NULL
+      );
+    `);
+
+    // Insert default user if users table is empty
+    const userCount = this.driver.get<{ count: number }>('SELECT COUNT(*) as count FROM users');
+    if (userCount && userCount.count === 0) {
+      this.driver.run(
+        'INSERT INTO users (id, name, color, isDefault, createdAt) VALUES (?, ?, ?, ?, ?)',
+        [randomUUID(), 'Me', '#3b82f6', 1, Date.now()]
+      );
+    }
+
     // Create tables (without indexes that depend on migrated columns)
     this.driver.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
@@ -1006,6 +1154,82 @@ export class LedgrDatabase {
       CREATE INDEX IF NOT EXISTS idx_reimbursements_expense ON transaction_reimbursements(expenseTransactionId);
       CREATE INDEX IF NOT EXISTS idx_reimbursements_income ON transaction_reimbursements(reimbursementTransactionId);
 
+      -- Saved Reports
+      CREATE TABLE IF NOT EXISTS saved_reports (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        config TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        lastAccessedAt INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_saved_reports_lastAccessed ON saved_reports(lastAccessedAt);
+
+      -- Phase 8: Transaction Attachments
+      CREATE TABLE IF NOT EXISTS transaction_attachments (
+        id TEXT PRIMARY KEY,
+        transactionId TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        filePath TEXT NOT NULL,
+        mimeType TEXT NOT NULL,
+        fileSize INTEGER NOT NULL DEFAULT 0,
+        createdAt INTEGER NOT NULL,
+        FOREIGN KEY (transactionId) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_transaction ON transaction_attachments(transactionId);
+
+      -- Encryption: User key pairs
+      CREATE TABLE IF NOT EXISTS user_keys (
+        userId TEXT PRIMARY KEY,
+        publicKey TEXT NOT NULL,
+        encryptedPrivateKey TEXT NOT NULL,
+        privateKeyIv TEXT NOT NULL,
+        privateKeyTag TEXT NOT NULL,
+        encryptionSalt TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      -- Encryption: Data encryption keys (per entity)
+      CREATE TABLE IF NOT EXISTS data_encryption_keys (
+        id TEXT NOT NULL,
+        entityType TEXT NOT NULL,
+        ownerId TEXT NOT NULL,
+        wrappedDek TEXT NOT NULL,
+        dekIv TEXT NOT NULL,
+        dekTag TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        PRIMARY KEY (id, entityType)
+      );
+
+      -- Encryption: Data shares (shared access to encrypted entities)
+      CREATE TABLE IF NOT EXISTS data_shares (
+        id TEXT PRIMARY KEY,
+        entityId TEXT NOT NULL,
+        entityType TEXT NOT NULL,
+        ownerId TEXT NOT NULL,
+        recipientId TEXT NOT NULL,
+        wrappedDek TEXT NOT NULL,
+        permissions TEXT NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_data_shares_entity ON data_shares(entityId, entityType);
+      CREATE INDEX IF NOT EXISTS idx_data_shares_recipient ON data_shares(recipientId);
+      CREATE INDEX IF NOT EXISTS idx_data_shares_owner ON data_shares(ownerId);
+
+      -- Encryption: Sharing defaults (auto-share rules)
+      CREATE TABLE IF NOT EXISTS sharing_defaults (
+        id TEXT PRIMARY KEY,
+        ownerId TEXT NOT NULL,
+        recipientId TEXT NOT NULL,
+        entityType TEXT NOT NULL,
+        permissions TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        UNIQUE(ownerId, recipientId, entityType)
+      );
+
       -- Additional indexes for performance
       CREATE INDEX IF NOT EXISTS idx_transaction_tags_transaction ON transaction_tags(transactionId);
       CREATE INDEX IF NOT EXISTS idx_transaction_tags_tag ON transaction_tags(tagId);
@@ -1085,14 +1309,93 @@ export class LedgrDatabase {
     }
   }
 
+  // User operations (household support)
+  getUsers(): User[] {
+    const rows = this.driver.all<UserRow>('SELECT * FROM users ORDER BY isDefault DESC, createdAt ASC');
+    return rows.map(this.mapUser);
+  }
+
+  getUserById(id: string): User | null {
+    const row = this.driver.get<UserRow>('SELECT * FROM users WHERE id = ?', [id]);
+    return row ? this.mapUser(row) : null;
+  }
+
+  getDefaultUser(): User {
+    const row = this.driver.get<UserRow>('SELECT * FROM users WHERE isDefault = 1');
+    if (row) return this.mapUser(row);
+    const fallback = this.driver.get<UserRow>('SELECT * FROM users ORDER BY createdAt ASC LIMIT 1');
+    return this.mapUser(fallback!);
+  }
+
+  createUser(name: string, color: string): User {
+    const id = randomUUID();
+    const createdAt = Date.now();
+    this.driver.run(
+      'INSERT INTO users (id, name, color, isDefault, createdAt) VALUES (?, ?, ?, ?, ?)',
+      [id, name, color, 0, createdAt]
+    );
+    return this.getUserById(id)!;
+  }
+
+  updateUser(id: string, updates: Partial<Omit<User, 'id' | 'createdAt'>>): User | null {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.name !== undefined) {
+      fields.push('name = ?');
+      values.push(updates.name);
+    }
+    if (updates.color !== undefined) {
+      fields.push('color = ?');
+      values.push(updates.color);
+    }
+    if (updates.isDefault !== undefined) {
+      if (updates.isDefault) {
+        this.driver.run('UPDATE users SET isDefault = 0');
+      }
+      fields.push('isDefault = ?');
+      values.push(updates.isDefault ? 1 : 0);
+    }
+
+    if (fields.length === 0) return this.getUserById(id);
+
+    values.push(id);
+    this.driver.run(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`, values);
+    return this.getUserById(id);
+  }
+
+  deleteUser(id: string): boolean {
+    const user = this.getUserById(id);
+    if (!user || user.isDefault) return false;
+
+    // Cascade-delete encryption data
+    this.driver.run('DELETE FROM user_keys WHERE userId = ?', [id]);
+    this.driver.run('DELETE FROM data_encryption_keys WHERE ownerId = ?', [id]);
+    this.driver.run('DELETE FROM data_shares WHERE ownerId = ? OR recipientId = ?', [id, id]);
+    this.driver.run('DELETE FROM sharing_defaults WHERE ownerId = ? OR recipientId = ?', [id, id]);
+
+    const result = this.driver.run('DELETE FROM users WHERE id = ? AND isDefault = 0', [id]);
+    return result.changes > 0;
+  }
+
+  private mapUser(row: UserRow): User {
+    return {
+      id: row.id,
+      name: row.name,
+      color: row.color,
+      isDefault: row.isDefault === 1,
+      createdAt: new Date(row.createdAt),
+    };
+  }
+
   // Account operations
   createAccount(account: Omit<Account, 'id' | 'createdAt'>): Account {
     const id = randomUUID();
     const createdAt = Date.now();
 
     this.driver.run(`
-      INSERT INTO accounts (id, name, type, institution, balance, lastSynced, createdAt, ofxUrl, ofxOrg, ofxFid, ofxUsername, ofxAccountId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO accounts (id, name, type, institution, balance, lastSynced, createdAt, ofxUrl, ofxOrg, ofxFid, ofxUsername, ofxAccountId, ownership, ownerId)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       id,
       account.name,
@@ -1105,7 +1408,9 @@ export class LedgrDatabase {
       account.ofxOrg ?? null,
       account.ofxFid ?? null,
       account.ofxUsername ?? null,
-      account.ofxAccountId ?? null
+      account.ofxAccountId ?? null,
+      account.ownership ?? 'mine',
+      account.ownerId ?? null
     ]);
 
     return this.getAccountById(id)!;
@@ -1164,6 +1469,14 @@ export class LedgrDatabase {
     if (updates.ofxAccountId !== undefined) {
       fields.push('ofxAccountId = ?');
       values.push(updates.ofxAccountId);
+    }
+    if (updates.ownership !== undefined) {
+      fields.push('ownership = ?');
+      values.push(updates.ownership);
+    }
+    if (updates.ownerId !== undefined) {
+      fields.push('ownerId = ?');
+      values.push(updates.ownerId);
     }
 
     if (fields.length === 0) return this.getAccountById(id);
@@ -1271,6 +1584,14 @@ export class LedgrDatabase {
     if (updates.isInternalTransfer !== undefined) {
       fields.push('isInternalTransfer = ?');
       values.push(updates.isInternalTransfer ? 1 : 0);
+    }
+    if (updates.notes !== undefined) {
+      fields.push('notes = ?');
+      values.push(updates.notes);
+    }
+    if (updates.isHidden !== undefined) {
+      fields.push('isHidden = ?');
+      values.push(updates.isHidden ? 1 : 0);
     }
 
     if (fields.length === 0) return this.getTransactionById(id);
@@ -1604,6 +1925,9 @@ export class LedgrDatabase {
       ofxFid: r.ofxFid,
       ofxUsername: r.ofxUsername,
       ofxAccountId: r.ofxAccountId,
+      ownership: (r.ownership as OwnershipType) || 'mine',
+      ownerId: r.ownerId,
+      isEncrypted: r.isEncrypted === 1,
     };
   }
 
@@ -1621,6 +1945,8 @@ export class LedgrDatabase {
       createdAt: new Date(r.createdAt),
       fitId: r.fitId,
       isInternalTransfer: r.isInternalTransfer === 1,
+      notes: r.notes || null,
+      isHidden: r.isHidden === 1,
     };
   }
 
@@ -1746,6 +2072,7 @@ export class LedgrDatabase {
       LEFT JOIN categories c ON t.categoryId = c.id
       WHERE t.amount < 0
         AND (t.isInternalTransfer IS NULL OR t.isInternalTransfer = 0)
+        AND (t.isHidden IS NULL OR t.isHidden = 0)
         AND t.id NOT IN (SELECT reimbursementTransactionId FROM transaction_reimbursements)
         AND c.id NOT IN (
           SELECT id FROM categories
@@ -1819,6 +2146,7 @@ export class LedgrDatabase {
         END) as net
       FROM transactions
       WHERE (isInternalTransfer IS NULL OR isInternalTransfer = 0)
+        AND (isHidden IS NULL OR isHidden = 0)
     `;
 
     const params: number[] = [];
@@ -1914,6 +2242,7 @@ export class LedgrDatabase {
       FROM transactions t
       INNER JOIN categories c ON t.categoryId = c.id
       WHERE ${conditions.join(' AND ')} AND t.amount < 0 AND (t.isInternalTransfer IS NULL OR t.isInternalTransfer = 0)
+        AND (t.isHidden IS NULL OR t.isHidden = 0)
         AND t.id NOT IN (SELECT reimbursementTransactionId FROM transaction_reimbursements)
       GROUP BY t.categoryId, period
       ORDER BY period ASC, t.categoryId
@@ -3073,8 +3402,8 @@ export class LedgrDatabase {
     const createdAt = Date.now();
 
     this.driver.run(`
-      INSERT INTO savings_goals (id, name, targetAmount, currentAmount, targetDate, accountId, icon, color, isActive, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO savings_goals (id, name, targetAmount, currentAmount, targetDate, accountId, icon, color, isActive, ownerId, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [id,
       goal.name,
       goal.targetAmount,
@@ -3084,6 +3413,7 @@ export class LedgrDatabase {
       goal.icon ?? null,
       goal.color ?? null,
       goal.isActive ? 1 : 0,
+      goal.ownerId ?? null,
       createdAt]);
 
     return this.getSavingsGoalById(id)!;
@@ -3140,6 +3470,10 @@ export class LedgrDatabase {
       fields.push('isActive = ?');
       values.push(updates.isActive ? 1 : 0);
     }
+    if (updates.ownerId !== undefined) {
+      fields.push('ownerId = ?');
+      values.push(updates.ownerId);
+    }
 
     if (fields.length === 0) return this.getSavingsGoalById(id);
 
@@ -3166,6 +3500,8 @@ export class LedgrDatabase {
       icon: r.icon,
       color: r.color,
       isActive: r.isActive === 1,
+      ownerId: r.ownerId ?? null,
+      isEncrypted: r.isEncrypted === 1,
       createdAt: new Date(r.createdAt),
     };
   }
@@ -3554,6 +3890,73 @@ export class LedgrDatabase {
     };
   }
 
+  // ==================== Transaction Attachments ====================
+
+  getAttachmentsByTransaction(transactionId: string): TransactionAttachment[] {
+    const rows = this.driver.all(
+      'SELECT * FROM transaction_attachments WHERE transactionId = ? ORDER BY createdAt DESC',
+      [transactionId]
+    );
+    return rows.map(this.mapAttachment);
+  }
+
+  getAttachmentById(id: string): TransactionAttachment | null {
+    const row = this.driver.get('SELECT * FROM transaction_attachments WHERE id = ?', [id]);
+    return row ? this.mapAttachment(row) : null;
+  }
+
+  createAttachment(data: { transactionId: string; filename: string; filePath: string; mimeType: string; fileSize: number }): TransactionAttachment {
+    const id = randomUUID();
+    const createdAt = Date.now();
+
+    this.driver.run(`
+      INSERT INTO transaction_attachments (id, transactionId, filename, filePath, mimeType, fileSize, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [id, data.transactionId, data.filename, data.filePath, data.mimeType, data.fileSize, createdAt]);
+
+    return this.getAttachmentById(id)!;
+  }
+
+  deleteAttachment(id: string): boolean {
+    const result = this.driver.run('DELETE FROM transaction_attachments WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
+  getAttachmentCount(transactionId: string): number {
+    const row = this.driver.get<{ count: number }>(
+      'SELECT COUNT(*) as count FROM transaction_attachments WHERE transactionId = ?',
+      [transactionId]
+    );
+    return row ? row.count : 0;
+  }
+
+  getAttachmentCountsByTransactionIds(transactionIds: string[]): Record<string, number> {
+    if (transactionIds.length === 0) return {};
+    const placeholders = transactionIds.map(() => '?').join(',');
+    const rows = this.driver.all<{ transactionId: string; count: number }>(
+      `SELECT transactionId, COUNT(*) as count FROM transaction_attachments WHERE transactionId IN (${placeholders}) GROUP BY transactionId`,
+      transactionIds
+    );
+    const result: Record<string, number> = {};
+    for (const row of rows) {
+      result[row.transactionId] = row.count;
+    }
+    return result;
+  }
+
+  private mapAttachment(row: unknown): TransactionAttachment {
+    const r = row as TransactionAttachmentRow;
+    return {
+      id: r.id,
+      transactionId: r.transactionId,
+      filename: r.filename,
+      filePath: r.filePath,
+      mimeType: r.mimeType,
+      fileSize: r.fileSize,
+      createdAt: new Date(r.createdAt),
+    };
+  }
+
   // ==================== Unified Recurring Items ====================
   createRecurringItem(item: Omit<RecurringItem, 'id' | 'createdAt'>): RecurringItem {
     const id = randomUUID();
@@ -3563,8 +3966,8 @@ export class LedgrDatabase {
     const enableReminders = (item.itemType === 'bill' || item.itemType === 'subscription') ? 1 : (item.enableReminders ? 1 : 0);
 
     this.driver.run(`
-      INSERT INTO recurring_items (id, description, amount, frequency, startDate, nextOccurrence, accountId, endDate, categoryId, dayOfMonth, dayOfWeek, itemType, enableReminders, reminderDays, autopay, isActive, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO recurring_items (id, description, amount, frequency, startDate, nextOccurrence, accountId, endDate, categoryId, dayOfMonth, dayOfWeek, itemType, enableReminders, reminderDays, autopay, isActive, ownerId, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [id,
       item.description,
       item.amount,
@@ -3581,6 +3984,7 @@ export class LedgrDatabase {
       item.reminderDays ?? null,
       item.autopay ? 1 : 0,
       item.isActive ? 1 : 0,
+      item.ownerId ?? null,
       createdAt]);
 
     return this.getRecurringItemById(id)!;
@@ -3672,6 +4076,10 @@ export class LedgrDatabase {
       fields.push('isActive = ?');
       values.push(updates.isActive ? 1 : 0);
     }
+    if (updates.ownerId !== undefined) {
+      fields.push('ownerId = ?');
+      values.push(updates.ownerId);
+    }
 
     if (fields.length === 0) return this.getRecurringItemById(id);
 
@@ -3705,6 +4113,8 @@ export class LedgrDatabase {
       reminderDays: r.reminderDays,
       autopay: r.autopay === 1,
       isActive: r.isActive === 1,
+      ownerId: r.ownerId ?? null,
+      isEncrypted: r.isEncrypted === 1,
       createdAt: new Date(r.createdAt),
     };
   }
@@ -3748,6 +4158,31 @@ export class LedgrDatabase {
       ORDER BY dueDate ASC
     `, [now, endDate]);
     return rows.map(this.mapRecurringPayment);
+  }
+
+  getRecurringPaymentsByDateRange(startDate: string, endDate: string): Array<RecurringPayment & { description: string; itemType: RecurringItemType; itemAmount: number }> {
+    const start = new Date(startDate).getTime();
+    const end = new Date(endDate).getTime();
+    const rows = this.driver.all(`
+      SELECT rp.*, ri.description, ri.itemType, ri.amount AS itemAmount
+      FROM recurring_payments rp
+      JOIN recurring_items ri ON rp.recurringItemId = ri.id
+      WHERE rp.dueDate >= ? AND rp.dueDate <= ?
+      ORDER BY rp.dueDate ASC
+    `, [start, end]);
+    return (rows as Array<RecurringPaymentRow & { description: string; itemType: string; itemAmount: number }>).map(r => ({
+      id: r.id,
+      recurringItemId: r.recurringItemId,
+      dueDate: new Date(r.dueDate),
+      paidDate: r.paidDate ? new Date(r.paidDate) : null,
+      amount: r.amount,
+      status: r.status as PaymentStatus,
+      transactionId: r.transactionId,
+      createdAt: new Date(r.createdAt),
+      description: r.description,
+      itemType: r.itemType as RecurringItemType,
+      itemAmount: r.itemAmount,
+    }));
   }
 
   updateRecurringPayment(id: string, updates: Partial<Omit<RecurringPayment, 'id' | 'createdAt' | 'recurringItemId'>>): RecurringPayment | null {
@@ -4048,12 +4483,13 @@ export class LedgrDatabase {
     const createdAt = Date.now();
 
     this.driver.run(`
-      INSERT INTO investment_accounts (id, name, institution, account_type, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO investment_accounts (id, name, institution, account_type, owner_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `, [id,
       account.name,
       account.institution,
       account.accountType,
+      account.ownerId ?? null,
       createdAt]);
 
     return this.getInvestmentAccountById(id)!;
@@ -4074,6 +4510,10 @@ export class LedgrDatabase {
     if (updates.accountType !== undefined) {
       fields.push('account_type = ?');
       values.push(updates.accountType);
+    }
+    if (updates.ownerId !== undefined) {
+      fields.push('owner_id = ?');
+      values.push(updates.ownerId);
     }
 
     if (fields.length === 0) return this.getInvestmentAccountById(id);
@@ -4096,6 +4536,8 @@ export class LedgrDatabase {
       name: r.name,
       institution: r.institution,
       accountType: r.account_type as InvestmentAccountType,
+      ownerId: r.owner_id ?? null,
+      isEncrypted: r.is_encrypted === 1,
       createdAt: new Date(r.created_at),
     };
   }
@@ -4931,9 +5373,9 @@ export class LedgrDatabase {
       INSERT INTO manual_assets (
         id, name, category, custom_category, value, liquidity, notes,
         reminder_frequency, last_reminder_date, next_reminder_date,
-        last_updated, created_at
+        owner_id, last_updated, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [id,
       asset.name,
       asset.category,
@@ -4944,6 +5386,7 @@ export class LedgrDatabase {
       asset.reminderFrequency ?? null,
       asset.lastReminderDate ? asset.lastReminderDate.getTime() : null,
       asset.nextReminderDate ? asset.nextReminderDate.getTime() : null,
+      asset.ownerId ?? null,
       now,
       now]);
 
@@ -4994,6 +5437,10 @@ export class LedgrDatabase {
       fields.push('last_updated = ?');
       values.push(updates.lastUpdated.getTime());
     }
+    if (updates.ownerId !== undefined) {
+      fields.push('owner_id = ?');
+      values.push(updates.ownerId);
+    }
 
     if (fields.length === 0) return this.getManualAssetById(id);
 
@@ -5039,6 +5486,8 @@ export class LedgrDatabase {
       reminderFrequency: r.reminder_frequency as 'monthly' | 'quarterly' | 'yearly' | null,
       lastReminderDate: r.last_reminder_date ? new Date(r.last_reminder_date) : null,
       nextReminderDate: r.next_reminder_date ? new Date(r.next_reminder_date) : null,
+      ownerId: r.owner_id ?? null,
+      isEncrypted: r.is_encrypted === 1,
       lastUpdated: new Date(r.last_updated),
       createdAt: new Date(r.created_at),
     };
@@ -5063,9 +5512,9 @@ export class LedgrDatabase {
       INSERT INTO manual_liabilities (
         id, name, type, balance, interest_rate, monthly_payment,
         original_amount, start_date, term_months, payoff_date, total_interest,
-        last_updated, notes, created_at
+        last_updated, notes, owner_id, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [id,
       liability.name,
       liability.type,
@@ -5079,6 +5528,7 @@ export class LedgrDatabase {
       liability.totalInterest ?? null,
       now,
       liability.notes ?? null,
+      liability.ownerId ?? null,
       now]);
 
     return this.getManualLiabilityById(id)!;
@@ -5136,6 +5586,10 @@ export class LedgrDatabase {
       fields.push('last_updated = ?');
       values.push(updates.lastUpdated.getTime());
     }
+    if (updates.ownerId !== undefined) {
+      fields.push('owner_id = ?');
+      values.push(updates.ownerId);
+    }
 
     if (fields.length === 0) return this.getManualLiabilityById(id);
 
@@ -5170,6 +5624,8 @@ export class LedgrDatabase {
       termMonths: r.term_months,
       payoffDate: r.payoff_date ? new Date(r.payoff_date) : null,
       totalInterest: r.total_interest,
+      ownerId: r.owner_id ?? null,
+      isEncrypted: r.is_encrypted === 1,
       lastUpdated: new Date(r.last_updated),
       notes: r.notes,
       createdAt: new Date(r.created_at),
@@ -5522,6 +5978,275 @@ export class LedgrDatabase {
     `, [expenseId, expense.date]);
 
     return rows.map((row: unknown) => this.mapTransaction(row));
+  }
+
+  // ==================== Saved Reports ====================
+
+  getSavedReports(): SavedReport[] {
+    const rows = this.driver.all('SELECT * FROM saved_reports ORDER BY name ASC');
+    return rows.map(this.mapSavedReport);
+  }
+
+  getSavedReportById(id: string): SavedReport | null {
+    const row = this.driver.get('SELECT * FROM saved_reports WHERE id = ?', [id]);
+    return row ? this.mapSavedReport(row) : null;
+  }
+
+  createSavedReport(name: string, config: string): SavedReport {
+    const id = randomUUID();
+    const now = Date.now();
+
+    this.driver.run(`
+      INSERT INTO saved_reports (id, name, config, createdAt, lastAccessedAt)
+      VALUES (?, ?, ?, ?, ?)
+    `, [id, name, config, now, now]);
+
+    return this.getSavedReportById(id)!;
+  }
+
+  updateSavedReport(id: string, updates: Partial<{ name: string; config: string; lastAccessedAt: number }>): SavedReport | null {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.name !== undefined) {
+      fields.push('name = ?');
+      values.push(updates.name);
+    }
+    if (updates.config !== undefined) {
+      fields.push('config = ?');
+      values.push(updates.config);
+    }
+    if (updates.lastAccessedAt !== undefined) {
+      fields.push('lastAccessedAt = ?');
+      values.push(updates.lastAccessedAt);
+    }
+
+    if (fields.length === 0) return this.getSavedReportById(id);
+
+    values.push(id);
+    this.driver.run(`UPDATE saved_reports SET ${fields.join(', ')} WHERE id = ?`, values);
+
+    return this.getSavedReportById(id);
+  }
+
+  deleteSavedReport(id: string): boolean {
+    const result = this.driver.run('DELETE FROM saved_reports WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
+  getRecentReports(limit: number = 5): SavedReport[] {
+    const rows = this.driver.all('SELECT * FROM saved_reports ORDER BY lastAccessedAt DESC LIMIT ?', [limit]);
+    return rows.map(this.mapSavedReport);
+  }
+
+  private mapSavedReport(row: unknown): SavedReport {
+    const r = row as SavedReportRow;
+    return {
+      id: r.id,
+      name: r.name,
+      config: r.config,
+      createdAt: new Date(r.createdAt),
+      lastAccessedAt: new Date(r.lastAccessedAt),
+    };
+  }
+
+  // ==================== User Keys CRUD ====================
+
+  getUserKeys(userId: string): UserKeys | null {
+    const row = this.driver.get<UserKeyRow>('SELECT * FROM user_keys WHERE userId = ?', [userId]);
+    return row ? this.mapUserKeys(row) : null;
+  }
+
+  setUserKeys(keys: UserKeys): void {
+    this.driver.run(`
+      INSERT OR REPLACE INTO user_keys (userId, publicKey, encryptedPrivateKey, privateKeyIv, privateKeyTag, encryptionSalt, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [
+      keys.userId,
+      keys.publicKey,
+      keys.encryptedPrivateKey,
+      keys.privateKeyIv,
+      keys.privateKeyTag,
+      keys.encryptionSalt,
+      keys.createdAt.getTime(),
+    ]);
+  }
+
+  private mapUserKeys(row: UserKeyRow): UserKeys {
+    return {
+      userId: row.userId,
+      publicKey: row.publicKey,
+      encryptedPrivateKey: row.encryptedPrivateKey,
+      privateKeyIv: row.privateKeyIv,
+      privateKeyTag: row.privateKeyTag,
+      encryptionSalt: row.encryptionSalt,
+      createdAt: new Date(row.createdAt),
+    };
+  }
+
+  // ==================== Data Encryption Keys CRUD ====================
+
+  getDEK(id: string, entityType: EncryptableEntityType): { id: string; entityType: string; ownerId: string; wrappedDek: string; dekIv: string; dekTag: string; createdAt: Date } | null {
+    const row = this.driver.get<DataEncryptionKeyRow>(
+      'SELECT * FROM data_encryption_keys WHERE id = ? AND entityType = ?',
+      [id, entityType]
+    );
+    if (!row) return null;
+    return {
+      id: row.id,
+      entityType: row.entityType,
+      ownerId: row.ownerId,
+      wrappedDek: row.wrappedDek,
+      dekIv: row.dekIv,
+      dekTag: row.dekTag,
+      createdAt: new Date(row.createdAt),
+    };
+  }
+
+  setDEK(dek: { id: string; entityType: EncryptableEntityType; ownerId: string; wrappedDek: string; dekIv: string; dekTag: string }): void {
+    this.driver.run(`
+      INSERT OR REPLACE INTO data_encryption_keys (id, entityType, ownerId, wrappedDek, dekIv, dekTag, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [dek.id, dek.entityType, dek.ownerId, dek.wrappedDek, dek.dekIv, dek.dekTag, Date.now()]);
+  }
+
+  updateDEK(id: string, entityType: EncryptableEntityType, updates: { wrappedDek: string; dekIv: string; dekTag: string }): boolean {
+    const result = this.driver.run(
+      'UPDATE data_encryption_keys SET wrappedDek = ?, dekIv = ?, dekTag = ? WHERE id = ? AND entityType = ?',
+      [updates.wrappedDek, updates.dekIv, updates.dekTag, id, entityType]
+    );
+    return result.changes > 0;
+  }
+
+  deleteDEKsByOwner(ownerId: string): number {
+    const result = this.driver.run('DELETE FROM data_encryption_keys WHERE ownerId = ?', [ownerId]);
+    return result.changes;
+  }
+
+  // ==================== Data Shares CRUD ====================
+
+  getSharesForEntity(entityId: string, entityType: EncryptableEntityType): DataShare[] {
+    const rows = this.driver.all<DataShareRow>(
+      'SELECT * FROM data_shares WHERE entityId = ? AND entityType = ? ORDER BY createdAt DESC',
+      [entityId, entityType]
+    );
+    return rows.map(this.mapDataShare);
+  }
+
+  getSharesForRecipient(recipientId: string): DataShare[] {
+    const rows = this.driver.all<DataShareRow>(
+      'SELECT * FROM data_shares WHERE recipientId = ? ORDER BY createdAt DESC',
+      [recipientId]
+    );
+    return rows.map(this.mapDataShare);
+  }
+
+  createShare(share: Omit<DataShare, 'id' | 'createdAt'>): DataShare {
+    const id = randomUUID();
+    const createdAt = Date.now();
+
+    this.driver.run(`
+      INSERT INTO data_shares (id, entityId, entityType, ownerId, recipientId, wrappedDek, permissions, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id,
+      share.entityId,
+      share.entityType,
+      share.ownerId,
+      share.recipientId,
+      share.wrappedDek,
+      JSON.stringify(share.permissions),
+      createdAt,
+    ]);
+
+    return {
+      id,
+      entityId: share.entityId,
+      entityType: share.entityType,
+      ownerId: share.ownerId,
+      recipientId: share.recipientId,
+      wrappedDek: share.wrappedDek,
+      permissions: share.permissions,
+      createdAt: new Date(createdAt),
+    };
+  }
+
+  deleteShare(id: string): boolean {
+    const result = this.driver.run('DELETE FROM data_shares WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
+  updateSharePermissions(id: string, permissions: SharePermissions): boolean {
+    const result = this.driver.run(
+      'UPDATE data_shares SET permissions = ? WHERE id = ?',
+      [JSON.stringify(permissions), id]
+    );
+    return result.changes > 0;
+  }
+
+  private mapDataShare(row: DataShareRow): DataShare {
+    return {
+      id: row.id,
+      entityId: row.entityId,
+      entityType: row.entityType as EncryptableEntityType,
+      ownerId: row.ownerId,
+      recipientId: row.recipientId,
+      wrappedDek: row.wrappedDek,
+      permissions: JSON.parse(row.permissions) as SharePermissions,
+      createdAt: new Date(row.createdAt),
+    };
+  }
+
+  // ==================== Sharing Defaults CRUD ====================
+
+  getSharingDefaults(ownerId: string, entityType?: EncryptableEntityType): SharingDefault[] {
+    if (entityType) {
+      const rows = this.driver.all<SharingDefaultRow>(
+        'SELECT * FROM sharing_defaults WHERE ownerId = ? AND entityType = ? ORDER BY createdAt DESC',
+        [ownerId, entityType]
+      );
+      return rows.map(this.mapSharingDefault);
+    }
+    const rows = this.driver.all<SharingDefaultRow>(
+      'SELECT * FROM sharing_defaults WHERE ownerId = ? ORDER BY createdAt DESC',
+      [ownerId]
+    );
+    return rows.map(this.mapSharingDefault);
+  }
+
+  setSharingDefault(sd: Omit<SharingDefault, 'id' | 'createdAt'>): SharingDefault {
+    const id = randomUUID();
+    const createdAt = Date.now();
+
+    this.driver.run(`
+      INSERT OR REPLACE INTO sharing_defaults (id, ownerId, recipientId, entityType, permissions, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [id, sd.ownerId, sd.recipientId, sd.entityType, JSON.stringify(sd.permissions), createdAt]);
+
+    return {
+      id,
+      ownerId: sd.ownerId,
+      recipientId: sd.recipientId,
+      entityType: sd.entityType,
+      permissions: sd.permissions,
+      createdAt: new Date(createdAt),
+    };
+  }
+
+  deleteSharingDefault(id: string): boolean {
+    const result = this.driver.run('DELETE FROM sharing_defaults WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
+  private mapSharingDefault(row: SharingDefaultRow): SharingDefault {
+    return {
+      id: row.id,
+      ownerId: row.ownerId,
+      recipientId: row.recipientId,
+      entityType: row.entityType as EncryptableEntityType,
+      permissions: JSON.parse(row.permissions) as SharePermissions,
+      createdAt: new Date(row.createdAt),
+    };
   }
 
   close(): void {

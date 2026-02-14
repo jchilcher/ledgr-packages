@@ -1,3 +1,11 @@
+export interface UserRow {
+  id: string;
+  name: string;
+  color: string;
+  isDefault: number;
+  createdAt: number;
+}
+
 export interface AccountRow {
   id: string;
   name: string;
@@ -12,6 +20,10 @@ export interface AccountRow {
   ofxFid: string | null;
   ofxUsername: string | null;
   ofxAccountId: string | null;
+  // Household ownership
+  ownership: string | null;
+  ownerId: string | null;
+  isEncrypted: number | null;
 }
 
 export interface TransactionRow {
@@ -26,6 +38,8 @@ export interface TransactionRow {
   createdAt: number;
   fitId: string | null; // Financial Institution Transaction ID for dedup
   isInternalTransfer: number; // 0 = false, 1 = true
+  notes: string | null;
+  isHidden: number; // 0 = false, 1 = true
 }
 
 export interface CategoryRow {
@@ -158,6 +172,8 @@ export interface SavingsGoalRow {
   icon: string | null;
   color: string | null;
   isActive: number;
+  ownerId: string | null;
+  isEncrypted: number | null;
   createdAt: number;
 }
 
@@ -207,6 +223,8 @@ export interface InvestmentAccountRow {
   name: string;
   institution: string;
   account_type: string;
+  owner_id: string | null;
+  is_encrypted: number | null;
   created_at: number;
 }
 
@@ -273,6 +291,8 @@ export interface RecurringItemRow {
   reminderDays: number | null;
   autopay: number;
   isActive: number;
+  ownerId: string | null;
+  isEncrypted: number | null;
   createdAt: number;
 }
 
@@ -298,6 +318,8 @@ export interface ManualAssetRow {
   reminder_frequency: string | null;
   last_reminder_date: number | null;
   next_reminder_date: number | null;
+  owner_id: string | null;
+  is_encrypted: number | null;
   last_updated: number;
   created_at: number;
 }
@@ -316,6 +338,8 @@ export interface ManualLiabilityRow {
   total_interest: number | null;
   last_updated: number;
   notes: string | null;
+  owner_id: string | null;
+  is_encrypted: number | null;
   created_at: number;
 }
 
@@ -352,4 +376,62 @@ export interface LiabilityValueHistoryRow {
   date: number;
   payment_amount: number | null;
   created_at: number;
+}
+
+export interface SavedReportRow {
+  id: string;
+  name: string;
+  config: string;
+  createdAt: number;
+  lastAccessedAt: number;
+}
+
+export interface TransactionAttachmentRow {
+  id: string;
+  transactionId: string;
+  filename: string;
+  filePath: string;
+  mimeType: string;
+  fileSize: number;
+  createdAt: number;
+}
+
+export interface UserKeyRow {
+  userId: string;
+  publicKey: string;
+  encryptedPrivateKey: string;
+  privateKeyIv: string;
+  privateKeyTag: string;
+  encryptionSalt: string;
+  createdAt: number;
+}
+
+export interface DataEncryptionKeyRow {
+  id: string;
+  entityType: string;
+  ownerId: string;
+  wrappedDek: string;
+  dekIv: string;
+  dekTag: string;
+  createdAt: number;
+}
+
+export interface DataShareRow {
+  id: string;
+  entityId: string;
+  entityType: string;
+  ownerId: string;
+  recipientId: string;
+  wrappedDek: string;
+  permissions: string;
+  createdAt: number;
+}
+
+export interface SharingDefaultRow {
+  id: string;
+  ownerId: string;
+  recipientId: string;
+  entityType: string;
+  permissions: string;
+  createdAt: number;
 }

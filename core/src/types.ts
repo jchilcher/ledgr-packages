@@ -29,6 +29,8 @@ export interface Transaction {
   importSource: ImportSource;
   createdAt: Date;
   isInternalTransfer?: boolean; // Internal transfers are excluded from analytics
+  notes?: string | null; // User notes for the transaction
+  isHidden?: boolean; // Hidden transactions are excluded from reports/analytics
 }
 
 export interface Category {

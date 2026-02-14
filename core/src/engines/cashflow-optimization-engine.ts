@@ -22,6 +22,7 @@ export interface AccountData {
   id: string;
   name: string;
   balance: number;
+  type?: string;
 }
 
 export interface BillPreferenceData {
@@ -452,8 +453,10 @@ export function generateTransferRecommendations(
   const recommendedDates = new Set<string>();
 
   // Find the primary checking account (for unassigned transactions)
+  // Exclude credit card accounts — their negative balances are expected debt
+  const nonCreditAccounts = accounts.filter(a => a.type !== 'credit');
   // Prefer checking accounts, then the one with highest balance
-  const sortedAccounts = [...accounts].sort((a, b) => {
+  const sortedAccounts = [...nonCreditAccounts].sort((a, b) => {
     // Checking accounts first
     if (a.name.toLowerCase().includes('checking') && !b.name.toLowerCase().includes('checking')) return -1;
     if (!a.name.toLowerCase().includes('checking') && b.name.toLowerCase().includes('checking')) return 1;
@@ -476,6 +479,11 @@ export function generateTransferRecommendations(
     if (projection.accountBalances && Object.keys(projection.accountBalances).length > 0) {
       // Use tracked per-account balances
       for (const [accountId, balance] of Object.entries(projection.accountBalances)) {
+        const account = accountMap.get(accountId);
+        // Skip credit card accounts — negative balances are expected debt,
+        // not a shortfall that needs an immediate transfer
+        if (account?.type === 'credit') continue;
+
         if (balance < 0) {
           accountsAtRisk.push({
             id: accountId,
@@ -504,7 +512,7 @@ export function generateTransferRecommendations(
 
       // Find other accounts that might have funds
       // Use initial balances as estimate since per-account tracking may not be working
-      for (const account of accounts) {
+      for (const account of nonCreditAccounts) {
         if (account.id === primaryAccount.id) continue;
         if (account.balance > bufferAmount * 2) {
           // Check if this account isn't already in the list
