@@ -521,6 +521,8 @@ export interface TransactionAttachment {
 // Encryption types
 export type EncryptableEntityType = 'account' | 'recurring_item' | 'savings_goal' | 'manual_asset' | 'manual_liability' | 'investment_account';
 
+export type SharingEntityType = EncryptableEntityType | 'all';
+
 export interface SharePermissions {
   view: boolean;
   combine: boolean;
@@ -552,7 +554,7 @@ export interface SharingDefault {
   id: string;
   ownerId: string;
   recipientId: string;
-  entityType: EncryptableEntityType;
+  entityType: SharingEntityType;
   permissions: SharePermissions;
   createdAt: Date;
 }

@@ -48,40 +48,34 @@ export interface CashFlowForecast {
 
 /**
  * Calculate the next occurrence date based on frequency
- * Uses UTC to avoid timezone issues
+ * Uses setUTC* methods to preserve the original time component,
+ * avoiding off-by-one display errors from UTC midnight → local timezone conversion.
  */
 export function calculateNextOccurrence(currentDate: Date, frequency: RecurringFrequency): Date {
-  // Work in UTC to avoid timezone issues
-  const year = currentDate.getUTCFullYear();
-  const month = currentDate.getUTCMonth();
-  const date = currentDate.getUTCDate();
-
-  let nextYear = year;
-  let nextMonth = month;
-  let nextDate = date;
+  const result = new Date(currentDate.getTime());
 
   switch (frequency) {
     case 'daily':
-      nextDate += 1;
+      result.setUTCDate(result.getUTCDate() + 1);
       break;
     case 'weekly':
-      nextDate += 7;
+      result.setUTCDate(result.getUTCDate() + 7);
       break;
     case 'biweekly':
-      nextDate += 14;
+      result.setUTCDate(result.getUTCDate() + 14);
       break;
     case 'monthly':
-      nextMonth += 1;
+      result.setUTCMonth(result.getUTCMonth() + 1);
       break;
     case 'quarterly':
-      nextMonth += 3;
+      result.setUTCMonth(result.getUTCMonth() + 3);
       break;
     case 'yearly':
-      nextYear += 1;
+      result.setUTCFullYear(result.getUTCFullYear() + 1);
       break;
   }
 
-  return new Date(Date.UTC(nextYear, nextMonth, nextDate));
+  return result;
 }
 
 /**

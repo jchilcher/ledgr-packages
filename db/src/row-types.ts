@@ -58,6 +58,29 @@ export interface CategoryRuleRow {
   categoryId: string;
   priority: number;
   createdAt: number;
+  // Enhanced automation conditions
+  amountMin: number | null;
+  amountMax: number | null;
+  accountFilter: string | null;    // JSON array of account IDs
+  directionFilter: string | null;  // 'income' | 'expense' | null
+}
+
+export interface AutomationRuleActionRow {
+  id: string;
+  ruleId: string;
+  actionType: string;
+  actionValue: string | null;
+  createdAt: number;
+}
+
+export interface PaycheckAllocationRow {
+  id: string;
+  incomeStreamId: string;
+  incomeDescription: string;
+  allocationType: string;
+  targetId: string;
+  amount: number;
+  createdAt: number;
 }
 
 export interface TagRow {

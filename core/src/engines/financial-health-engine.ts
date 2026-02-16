@@ -7,6 +7,7 @@ export interface FinancialHealthFactor {
   weight: number;
   description: string;
   recommendation?: string;
+  metric?: { currentValue: string; targetValue: string; unit: string };
 }
 
 export interface FinancialHealthScore {
@@ -138,6 +139,11 @@ function calculateSavingsRateFactor(
     weight: 0.25,
     description,
     recommendation,
+    metric: {
+      currentValue: savingsRate.toFixed(1),
+      targetValue: '20',
+      unit: '%',
+    },
   };
 }
 
@@ -163,6 +169,7 @@ function calculateBudgetAdherenceFactor(
 
   let totalScore = 0;
   let categoriesWithBudget = 0;
+  let categoriesOnBudget = 0;
 
   for (const goal of budgetGoals) {
     if (goal.period !== 'monthly') continue;
@@ -180,6 +187,10 @@ function calculateBudgetAdherenceFactor(
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const adherenceRatio = goal.amount > 0 ? spending / goal.amount : 1;
+
+    if (adherenceRatio <= 1.0) {
+      categoriesOnBudget++;
+    }
 
     if (adherenceRatio <= 0.9) {
       totalScore += 100;
@@ -220,6 +231,11 @@ function calculateBudgetAdherenceFactor(
     weight: 0.20,
     description,
     recommendation,
+    metric: {
+      currentValue: `${categoriesOnBudget}/${categoriesWithBudget}`,
+      targetValue: `${categoriesWithBudget}/${categoriesWithBudget}`,
+      unit: 'on budget',
+    },
   };
 }
 
@@ -276,6 +292,11 @@ function calculateEmergencyFundFactor(
     weight: 0.20,
     description,
     recommendation,
+    metric: {
+      currentValue: monthsCovered.toFixed(1),
+      targetValue: '6',
+      unit: 'months',
+    },
   };
 }
 
@@ -334,6 +355,11 @@ function calculateDebtToIncomeFactor(
     weight: 0.15,
     description,
     recommendation,
+    metric: {
+      currentValue: dtiRatio.toFixed(1),
+      targetValue: '20',
+      unit: '% DTI',
+    },
   };
 }
 
@@ -393,6 +419,11 @@ function calculateNetWorthTrendFactor(
     weight: 0.10,
     description,
     recommendation,
+    metric: {
+      currentValue: changePercent >= 0 ? `+${changePercent.toFixed(1)}` : changePercent.toFixed(1),
+      targetValue: '+10',
+      unit: '% growth',
+    },
   };
 }
 
@@ -448,6 +479,11 @@ function calculateSavingsGoalFactor(
     weight: 0.10,
     description,
     recommendation,
+    metric: {
+      currentValue: averageProgress.toFixed(0),
+      targetValue: '100',
+      unit: '% complete',
+    },
   };
 }
 

@@ -111,6 +111,17 @@ export {
 } from './engines/spending-velocity-engine';
 
 export {
+  // Safe to Spend Engine
+  SafeToSpendInput,
+  SafeToSpendResult,
+  SafeToSpendBreakdownBill,
+  SafeToSpendBreakdownSavings,
+  SafeToSpendBreakdownBudget,
+  calculateSafeToSpend,
+  SafeToSpendEngine,
+} from './engines/safe-to-spend-engine';
+
+export {
   // Comparison Engine
   SpendingComparison,
   ComparisonPeriod,
@@ -215,6 +226,25 @@ export {
   CashFlowOptimizationEngine,
 } from './engines/cashflow-optimization-engine';
 
+export {
+  // Age of Money Engine
+  AgeOfMoneyInput,
+  AgeOfMoneyResult,
+  calculateAgeOfMoney,
+  AgeOfMoneyEngine,
+} from './engines/age-of-money-engine';
+
+export {
+  // Tax Lot Report Engine
+  TaxLotReportInput,
+  TaxLotReportEntry,
+  TaxLotGainGroup,
+  WashSaleFlag,
+  TaxLotReport,
+  generateTaxLotReport,
+  TaxLotReportEngine,
+} from './engines/tax-lot-report-engine';
+
 // Parsers
 export {
   ParsedTransaction,
@@ -304,3 +334,17 @@ export {
   NetWorthService,
   netWorthService,
 } from './services/NetWorthService';
+
+export {
+  // Paycheck Budget Engine
+  PaycheckAllocationType,
+  PaycheckAllocationData,
+  PaycheckBudgetViewInput,
+  PaycheckAllocation,
+  PaycheckBudgetView,
+  PaycheckValidationResult,
+  buildPaycheckView,
+  buildAllPaycheckViews,
+  validatePaycheckAllocations,
+  PaycheckBudgetEngine,
+} from './engines/paycheck-budget-engine';

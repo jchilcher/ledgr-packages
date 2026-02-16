@@ -58,6 +58,7 @@ import type {
   SharingDefault,
   SharePermissions,
   EncryptableEntityType,
+  SharingEntityType,
 } from './types';
 import {
   AccountRow, TransactionRow, CategoryRow, CategoryRuleRow, TagRow,
@@ -71,8 +72,11 @@ import {
   AssetValueHistoryRow, LiabilityValueHistoryRow,
   SavedReportRow, UserRow, TransactionAttachmentRow,
   UserKeyRow, DataEncryptionKeyRow, DataShareRow, SharingDefaultRow,
+  AutomationRuleActionRow, PaycheckAllocationRow,
 } from './row-types';
 import { randomUUID } from 'crypto';
+
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export class LedgrDatabase {
   protected driver: SQLiteDriver;
@@ -186,11 +190,29 @@ export class LedgrDatabase {
     // Migrate savings amounts from dollars to cents (missed in original migration)
     this.migrateSavingsToCents();
 
-    // Sync all pinned savings goals with their account balances
-    this.syncAllPinnedSavingsGoals();
-
     // Add isEncrypted columns to entity tables
     this.migrateEncryptionColumns();
+
+    // Add enhanced automation rule columns to category_rules
+    this.migrateAutomationRuleColumns();
+  }
+
+  private migrateAutomationRuleColumns(): void {
+    const columns = this.driver.all<{ name: string }>("PRAGMA table_info(category_rules)");
+    const columnNames = columns.map(c => c.name);
+
+    if (!columnNames.includes('amountMin')) {
+      this.driver.exec('ALTER TABLE category_rules ADD COLUMN amountMin REAL');
+    }
+    if (!columnNames.includes('amountMax')) {
+      this.driver.exec('ALTER TABLE category_rules ADD COLUMN amountMax REAL');
+    }
+    if (!columnNames.includes('accountFilter')) {
+      this.driver.exec('ALTER TABLE category_rules ADD COLUMN accountFilter TEXT');
+    }
+    if (!columnNames.includes('directionFilter')) {
+      this.driver.exec('ALTER TABLE category_rules ADD COLUMN directionFilter TEXT');
+    }
   }
 
   private migrateDollarsToCents(): void {
@@ -1230,6 +1252,30 @@ export class LedgrDatabase {
         UNIQUE(ownerId, recipientId, entityType)
       );
 
+      -- Enhanced Automation Rule Actions
+      CREATE TABLE IF NOT EXISTS automation_rule_actions (
+        id TEXT PRIMARY KEY,
+        ruleId TEXT NOT NULL REFERENCES category_rules(id) ON DELETE CASCADE,
+        actionType TEXT NOT NULL CHECK(actionType IN ('assign_category','add_tag','hide_from_reports','mark_transfer')),
+        actionValue TEXT,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_automation_actions_rule ON automation_rule_actions(ruleId);
+
+      -- Paycheck-Based Budgeting
+      CREATE TABLE IF NOT EXISTS paycheck_allocations (
+        id TEXT PRIMARY KEY,
+        incomeStreamId TEXT NOT NULL,
+        incomeDescription TEXT NOT NULL,
+        allocationType TEXT NOT NULL CHECK(allocationType IN ('recurring_item','budget_category','savings_goal')),
+        targetId TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_paycheck_alloc_stream ON paycheck_allocations(incomeStreamId);
+
       -- Additional indexes for performance
       CREATE INDEX IF NOT EXISTS idx_transaction_tags_transaction ON transaction_tags(transactionId);
       CREATE INDEX IF NOT EXISTS idx_transaction_tags_tag ON transaction_tags(tagId);
@@ -1518,11 +1564,11 @@ export class LedgrDatabase {
       isInternalTransfer ? 1 : 0]);
 
     // Auto-create contribution for pinned savings goals
+    // Note: balance sync is handled at the IPC layer (encryption-aware)
     if (isSavingsAccount) {
       const goal = this.getSavingsGoalByAccountId(transaction.accountId);
       if (goal) {
         this.createContributionFromTransaction(goal.id, id);
-        this.syncSavingsGoalWithAccount(goal.id);
       }
     }
 
@@ -6202,8 +6248,8 @@ export class LedgrDatabase {
   getSharingDefaults(ownerId: string, entityType?: EncryptableEntityType): SharingDefault[] {
     if (entityType) {
       const rows = this.driver.all<SharingDefaultRow>(
-        'SELECT * FROM sharing_defaults WHERE ownerId = ? AND entityType = ? ORDER BY createdAt DESC',
-        [ownerId, entityType]
+        'SELECT * FROM sharing_defaults WHERE ownerId = ? AND (entityType = ? OR entityType = ?) ORDER BY createdAt DESC',
+        [ownerId, entityType, 'all']
       );
       return rows.map(this.mapSharingDefault);
     }
@@ -6233,6 +6279,26 @@ export class LedgrDatabase {
     };
   }
 
+  updateSharingDefault(id: string, updates: { entityType?: SharingEntityType; permissions?: SharePermissions }): boolean {
+    const parts: string[] = [];
+    const params: (string)[] = [];
+    if (updates.entityType !== undefined) {
+      parts.push('entityType = ?');
+      params.push(updates.entityType);
+    }
+    if (updates.permissions !== undefined) {
+      parts.push('permissions = ?');
+      params.push(JSON.stringify(updates.permissions));
+    }
+    if (parts.length === 0) return false;
+    params.push(id);
+    const result = this.driver.run(
+      `UPDATE sharing_defaults SET ${parts.join(', ')} WHERE id = ?`,
+      params
+    );
+    return result.changes > 0;
+  }
+
   deleteSharingDefault(id: string): boolean {
     const result = this.driver.run('DELETE FROM sharing_defaults WHERE id = ?', [id]);
     return result.changes > 0;
@@ -6243,10 +6309,120 @@ export class LedgrDatabase {
       id: row.id,
       ownerId: row.ownerId,
       recipientId: row.recipientId,
-      entityType: row.entityType as EncryptableEntityType,
+      entityType: row.entityType as SharingEntityType,
       permissions: JSON.parse(row.permissions) as SharePermissions,
       createdAt: new Date(row.createdAt),
     };
+  }
+
+  // ==================== Enhanced Automation Rule Actions ====================
+
+  getActionsForRule(ruleId: string): AutomationRuleActionRow[] {
+    return this.driver.all<AutomationRuleActionRow>(
+      'SELECT * FROM automation_rule_actions WHERE ruleId = ? ORDER BY createdAt ASC',
+      [ruleId]
+    );
+  }
+
+  createAutomationAction(action: { ruleId: string; actionType: string; actionValue: string | null }): AutomationRuleActionRow {
+    const id = randomUUID();
+    const now = Date.now();
+    this.driver.run(
+      'INSERT INTO automation_rule_actions (id, ruleId, actionType, actionValue, createdAt) VALUES (?, ?, ?, ?, ?)',
+      [id, action.ruleId, action.actionType, action.actionValue, now]
+    );
+    return { id, ruleId: action.ruleId, actionType: action.actionType, actionValue: action.actionValue, createdAt: now };
+  }
+
+  deleteAutomationAction(id: string): boolean {
+    const result = this.driver.run('DELETE FROM automation_rule_actions WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
+  updateRuleConditions(id: string, conditions: {
+    amountMin?: number | null;
+    amountMax?: number | null;
+    accountFilter?: string[] | null;
+    directionFilter?: string | null;
+  }): boolean {
+    const fields: string[] = [];
+    const params: (string | number | null)[] = [];
+
+    if (conditions.amountMin !== undefined) {
+      fields.push('amountMin = ?');
+      params.push(conditions.amountMin);
+    }
+    if (conditions.amountMax !== undefined) {
+      fields.push('amountMax = ?');
+      params.push(conditions.amountMax);
+    }
+    if (conditions.accountFilter !== undefined) {
+      fields.push('accountFilter = ?');
+      params.push(conditions.accountFilter ? JSON.stringify(conditions.accountFilter) : null);
+    }
+    if (conditions.directionFilter !== undefined) {
+      fields.push('directionFilter = ?');
+      params.push(conditions.directionFilter);
+    }
+
+    if (fields.length === 0) return false;
+    params.push(id);
+    const result = this.driver.run(
+      `UPDATE category_rules SET ${fields.join(', ')} WHERE id = ?`,
+      params
+    );
+    return result.changes > 0;
+  }
+
+  // ==================== Paycheck Allocations ====================
+
+  getAllPaycheckAllocations(): PaycheckAllocationRow[] {
+    return this.driver.all<PaycheckAllocationRow>(
+      'SELECT * FROM paycheck_allocations ORDER BY createdAt ASC'
+    );
+  }
+
+  getPaycheckAllocationsByStream(incomeStreamId: string): PaycheckAllocationRow[] {
+    return this.driver.all<PaycheckAllocationRow>(
+      'SELECT * FROM paycheck_allocations WHERE incomeStreamId = ? ORDER BY createdAt ASC',
+      [incomeStreamId]
+    );
+  }
+
+  createPaycheckAllocation(allocation: {
+    incomeStreamId: string;
+    incomeDescription: string;
+    allocationType: string;
+    targetId: string;
+    amount: number;
+  }): PaycheckAllocationRow {
+    const id = randomUUID();
+    const now = Date.now();
+    this.driver.run(
+      'INSERT INTO paycheck_allocations (id, incomeStreamId, incomeDescription, allocationType, targetId, amount, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, allocation.incomeStreamId, allocation.incomeDescription, allocation.allocationType, allocation.targetId, allocation.amount, now]
+    );
+    return {
+      id,
+      incomeStreamId: allocation.incomeStreamId,
+      incomeDescription: allocation.incomeDescription,
+      allocationType: allocation.allocationType,
+      targetId: allocation.targetId,
+      amount: allocation.amount,
+      createdAt: now,
+    };
+  }
+
+  updatePaycheckAllocation(id: string, updates: { amount?: number }): PaycheckAllocationRow | null {
+    if (updates.amount === undefined) return null;
+    this.driver.run('UPDATE paycheck_allocations SET amount = ? WHERE id = ?', [updates.amount, id]);
+    const row = this.driver.get<PaycheckAllocationRow>('SELECT * FROM paycheck_allocations WHERE id = ?', [id]);
+    return row || null;
+  }
+
+  deletePaycheckAllocation(id: string): boolean {
+    const result = this.driver.run('DELETE FROM paycheck_allocations WHERE id = ?', [id]);
+    return result.changes > 0;
   }
 
   close(): void {
