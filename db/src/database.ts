@@ -565,6 +565,22 @@ export class LedgrDatabase {
       FROM bill_payments;
     `);
 
+    // Recurring item rules table
+    this.driver.exec(`
+      CREATE TABLE IF NOT EXISTS recurring_item_rules (
+        id TEXT PRIMARY KEY,
+        pattern TEXT NOT NULL,
+        recurringItemId TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 50,
+        amountMin REAL,
+        amountMax REAL,
+        accountFilter TEXT,
+        createdAt INTEGER NOT NULL,
+        FOREIGN KEY (recurringItemId) REFERENCES recurring_items(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_recurring_item_rules_item ON recurring_item_rules(recurringItemId);
+    `);
+
     // Transaction reimbursement linking table
     this.driver.exec(`
       CREATE TABLE IF NOT EXISTS transaction_reimbursements (
@@ -4283,6 +4299,130 @@ export class LedgrDatabase {
     };
   }
 
+  // Recurring Item Rules
+  getRecurringItemRules(): Array<{
+    id: string;
+    pattern: string;
+    recurringItemId: string;
+    priority: number;
+    amountMin: number | null;
+    amountMax: number | null;
+    accountFilter: string | null;
+    createdAt: Date;
+  }> {
+    const rows = this.driver.all('SELECT * FROM recurring_item_rules ORDER BY priority DESC');
+    return (rows as Array<{
+      id: string;
+      pattern: string;
+      recurringItemId: string;
+      priority: number;
+      amountMin: number | null;
+      amountMax: number | null;
+      accountFilter: string | null;
+      createdAt: number;
+    }>).map(r => ({
+      id: r.id,
+      pattern: r.pattern,
+      recurringItemId: r.recurringItemId,
+      priority: r.priority,
+      amountMin: r.amountMin,
+      amountMax: r.amountMax,
+      accountFilter: r.accountFilter,
+      createdAt: new Date(r.createdAt),
+    }));
+  }
+
+  createRecurringItemRule(rule: Omit<{
+    id: string;
+    pattern: string;
+    recurringItemId: string;
+    priority: number;
+    amountMin: number | null;
+    amountMax: number | null;
+    accountFilter: string | null;
+    createdAt: Date;
+  }, 'id' | 'createdAt'>): {
+    id: string;
+    pattern: string;
+    recurringItemId: string;
+    priority: number;
+    amountMin: number | null;
+    amountMax: number | null;
+    accountFilter: string | null;
+    createdAt: Date;
+  } {
+    const id = randomUUID();
+    const createdAt = Date.now();
+
+    this.driver.run(`
+      INSERT INTO recurring_item_rules (id, pattern, recurringItemId, priority, amountMin, amountMax, accountFilter, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id,
+      rule.pattern,
+      rule.recurringItemId,
+      rule.priority,
+      rule.amountMin ?? null,
+      rule.amountMax ?? null,
+      rule.accountFilter ?? null,
+      createdAt
+    ]);
+
+    return {
+      id,
+      pattern: rule.pattern,
+      recurringItemId: rule.recurringItemId,
+      priority: rule.priority,
+      amountMin: rule.amountMin,
+      amountMax: rule.amountMax,
+      accountFilter: rule.accountFilter,
+      createdAt: new Date(createdAt),
+    };
+  }
+
+  updateRecurringItemRule(id: string, updates: Partial<{
+    pattern: string;
+    priority: number;
+    amountMin: number | null;
+    amountMax: number | null;
+    accountFilter: string | null;
+  }>): boolean {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.pattern !== undefined) {
+      fields.push('pattern = ?');
+      values.push(updates.pattern);
+    }
+    if (updates.priority !== undefined) {
+      fields.push('priority = ?');
+      values.push(updates.priority);
+    }
+    if (updates.amountMin !== undefined) {
+      fields.push('amountMin = ?');
+      values.push(updates.amountMin);
+    }
+    if (updates.amountMax !== undefined) {
+      fields.push('amountMax = ?');
+      values.push(updates.amountMax);
+    }
+    if (updates.accountFilter !== undefined) {
+      fields.push('accountFilter = ?');
+      values.push(updates.accountFilter);
+    }
+
+    if (fields.length === 0) return false;
+
+    values.push(id);
+    const result = this.driver.run(`UPDATE recurring_item_rules SET ${fields.join(', ')} WHERE id = ?`, values);
+    return result.changes > 0;
+  }
+
+  deleteRecurringItemRule(id: string): boolean {
+    const result = this.driver.run('DELETE FROM recurring_item_rules WHERE id = ?', [id]);
+    return result.changes > 0;
+  }
+
   // ==================== Phase 7: Prediction & Reporting ====================
 
   // Seasonal Patterns
@@ -4853,7 +4993,7 @@ export class LedgrDatabase {
         lotId = this.applyBuyTransaction(tx, id);
         break;
       case 'sell':
-        this.applySellTransaction(tx);
+        lotId = this.applySellTransaction(tx);
         break;
       case 'drip':
         lotId = this.applyDripTransaction(tx, id);
@@ -4976,8 +5116,9 @@ export class LedgrDatabase {
   }
 
   // Helper: Apply sell transaction - reduces lots using FIFO
-  private applySellTransaction(tx: Omit<InvestmentTransaction, 'id' | 'createdAt' | 'lotId'>): void {
+  private applySellTransaction(tx: Omit<InvestmentTransaction, 'id' | 'createdAt' | 'lotId'>): string | null {
     let sharesToSell = Math.abs(tx.shares);
+    let firstLotId: string | null = null;
 
     // Get lots ordered by purchase date (FIFO)
     const lots = this.driver.all<CostBasisLotRow>(`
@@ -4989,6 +5130,8 @@ export class LedgrDatabase {
     for (const lot of lots) {
       if (sharesToSell <= 0) break;
 
+      if (!firstLotId) firstLotId = lot.id;
+
       const sharesToDeduct = Math.min(lot.remaining_shares, sharesToSell);
       const newRemaining = lot.remaining_shares - sharesToDeduct;
 
@@ -4999,6 +5142,8 @@ export class LedgrDatabase {
 
     // Recalculate holding aggregates
     this.recalculateHoldingAggregates(tx.holdingId);
+
+    return firstLotId;
   }
 
   // Helper: Apply DRIP transaction - creates a new lot from reinvested dividends

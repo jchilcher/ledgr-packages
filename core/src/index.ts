@@ -348,3 +348,16 @@ export {
   validatePaycheckAllocations,
   PaycheckBudgetEngine,
 } from './engines/paycheck-budget-engine';
+
+export {
+  // Recurring Payment Engine
+  RecurringPaymentDependencies,
+  generatePayments,
+} from './engines/recurring-payment-engine';
+
+export {
+  // Recurring Matching Engine
+  RecurringMatchResult,
+  RecurringMatchingDependencies,
+  matchTransaction,
+} from './engines/recurring-matching-engine';

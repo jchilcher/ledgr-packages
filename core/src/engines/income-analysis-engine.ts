@@ -36,13 +36,6 @@ interface IncomeGroup {
 }
 
 /**
- * Generate a unique ID
- */
-function generateId(): string {
-  return `income_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-}
-
-/**
  * Normalize description for grouping income sources
  */
 function normalizeDescription(description: string): string {
@@ -212,7 +205,7 @@ export function identifyIncomeStreams(
     );
 
     streams.push({
-      id: generateId(),
+      id: sorted[0].description.replace(/\s+/g, '-').toLowerCase() + '-' + frequency,
       description: sorted[0].description,
       normalizedDescription: normalized,
       averageAmount: avgAmount,
